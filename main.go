@@ -1,7 +1,6 @@
 package main
 
 import (
-	"container/list"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -13,24 +12,27 @@ import (
 type entry struct {
 	key       int
 	value     int
-	timestamp time.Time 
+	timestamp time.Time
+	prev      *entry
+	next      *entry
 }
 
 type LRUCache struct {
-	capacity  int
-	cache     map[int]*list.Element
-	eviction  *list.List
-	mutex     sync.Mutex
-	expiration time.Duration 
+	capacity   int
+	cache      map[int]*entry
+	head, tail *entry
+	mutex      sync.Mutex
+	expiration time.Duration
 }
 
 func Constructor(capacity int, expiration time.Duration) LRUCache {
-	return LRUCache{
-		capacity:  capacity,
-		cache:     make(map[int]*list.Element),
-		eviction:  list.New(),
-		expiration: expiration, 
+	cache := LRUCache{
+		capacity:   capacity,
+		cache:      make(map[int]*entry),
+		expiration: expiration,
 	}
+	go cache.startEvictionRoutine()
+	return cache
 }
 
 func (this *LRUCache) Get(key int) int {
@@ -38,12 +40,13 @@ func (this *LRUCache) Get(key int) int {
 	defer this.mutex.Unlock()
 
 	if elem, ok := this.cache[key]; ok {
-		entry := elem.Value.(*entry)
+		entry := elem
+		entry.timestamp = time.Now()
 		if time.Since(entry.timestamp) > this.expiration {
-			this.evict(key) // Evict the key if expired
+			this.evict(key)
 			return -1
 		}
-		this.eviction.MoveToFront(elem)
+		this.moveToFront(entry)
 		return entry.value
 	}
 	return -1
@@ -54,27 +57,68 @@ func (this *LRUCache) Set(key int, value int) {
 	defer this.mutex.Unlock()
 
 	if elem, ok := this.cache[key]; ok {
-		entry := elem.Value.(*entry)
+		entry := elem
 		entry.value = value
 		entry.timestamp = time.Now()
-		this.eviction.MoveToFront(elem)
+		this.moveToFront(entry)
 	} else {
 		if len(this.cache) >= this.capacity {
-			back := this.eviction.Back()
-			if back != nil {
-				this.evict(back.Value.(*entry).key)
-			}
+			this.evict(this.tail.key)
 		}
 		newEntry := &entry{key: key, value: value, timestamp: time.Now()}
-		elem := this.eviction.PushFront(newEntry)
-		this.cache[key] = elem
+		this.cache[key] = newEntry
+		this.addToFront(newEntry)
 	}
 }
 
 func (this *LRUCache) evict(key int) {
 	if elem, ok := this.cache[key]; ok {
 		delete(this.cache, key)
-		this.eviction.Remove(elem)
+		this.remove(elem)
+		log.Printf("Evicted key: %d\n", key)
+	}
+}
+
+func (this *LRUCache) moveToFront(entry *entry) {
+	this.remove(entry)
+	this.addToFront(entry)
+}
+
+func (this *LRUCache) addToFront(entry *entry) {
+	entry.prev = nil
+	entry.next = this.head
+	if this.head != nil {
+		this.head.prev = entry
+	}
+	this.head = entry
+	if this.tail == nil {
+		this.tail = entry
+	}
+}
+
+func (this *LRUCache) remove(entry *entry) {
+	if entry.prev != nil {
+		entry.prev.next = entry.next
+	} else {
+		this.head = entry.next
+	}
+	if entry.next != nil {
+		entry.next.prev = entry.prev
+	} else {
+		this.tail = entry.prev
+	}
+}
+
+func (this *LRUCache) startEvictionRoutine() {
+	ticker := time.Tick(1 * time.Second)
+	for range ticker {
+		this.mutex.Lock()
+		for key, elem := range this.cache {
+			if time.Since(elem.timestamp) > this.expiration {
+				this.evict(key)
+			}
+		}
+		this.mutex.Unlock()
 	}
 }
 
